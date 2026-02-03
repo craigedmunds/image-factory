@@ -1,0 +1,169 @@
+# For inclusion in an image factory state repo
+version: '3'
+
+tasks:
+  # Setup and initialization
+  setup:
+    desc: Set up the Image Factory environment (app + cdk8s)
+    cmds:
+      - task: app:setup
+      - task: cdk8s:setup
+
+  app:setup:
+    desc: Set up the Image Factory app tool
+    dir: image-factory/app
+    cmds:
+      - uv venv
+      - uv pip install -e .
+
+  cdk8s:setup:
+    desc: Set up the CDK8s environment
+    dir: image-factory/cdk8s
+    cmds:
+      - uv venv
+      - uv pip install -e .
+
+  # Submodule management
+  submodule:use-local:
+    desc: Switch to local image-factory reference (symlink for development)
+    cmds:
+      - |
+        if [ -L image-factory ]; then
+          echo "Already using local reference"
+        elif [ -d image-factory ]; then
+          echo "Removing submodule..."
+          git submodule deinit -f image-factory
+          rm -rf image-factory .git/modules/image-factory
+          git config -f .gitmodules --remove-section submodule.image-factory 2>/dev/null || true
+          git add .gitmodules
+          echo "Creating symlink to local repo..."
+          ln -s ../image-factory image-factory
+          echo "Switched to local reference"
+        else
+          echo "Creating symlink to local repo..."
+          ln -s ../image-factory image-factory
+          echo "Switched to local reference"
+        fi
+
+  submodule:use-remote:
+    desc: Switch to remote image-factory reference (proper submodule)
+    cmds:
+      - |
+        if [ -L image-factory ]; then
+          echo "Removing symlink..."
+          rm image-factory
+          echo "Adding submodule..."
+          git submodule add https://github.com/craigedmunds/image-factory.git image-factory
+          git submodule update --init --recursive
+          echo "Switched to remote submodule"
+        elif [ -d image-factory/.git ]; then
+          echo "Already using remote submodule"
+        else
+          echo "Adding submodule..."
+          git submodule add https://github.com/craigedmunds/image-factory.git image-factory
+          git submodule update --init --recursive
+          echo "Switched to remote submodule"
+        fi
+
+  submodule:status:
+    desc: Check whether using local or remote image-factory reference
+    cmds:
+      - |
+        if [ -L image-factory ]; then
+          echo "Using LOCAL reference (symlink)"
+          ls -l image-factory
+        elif [ -d image-factory/.git ]; then
+          echo "Using REMOTE submodule"
+          cd image-factory && git remote -v
+        else
+          echo "image-factory not found"
+        fi
+
+  # Generation workflow (what Kargo normally does)
+  app:generate:
+    desc: Generate state files from images.yaml
+    dir: image-factory/app
+    cmds:
+      - .venv/bin/python app.py --images-yaml ../../images.yaml --output-dir ../..
+
+  synth:
+    desc: Generate Kargo manifests from state files (CDK8s synthesis)
+    dir: image-factory/cdk8s
+    env:
+      IMAGE_FACTORY_STATE_DIR: ../..
+    cmds:
+      - .venv/bin/python main.py
+
+  generate:
+    desc: Run the complete generation workflow (app → cdk8s)
+    cmds:
+      - task: app:generate
+      - task: synth
+
+  # Manual workflow steps (normally done by Kargo)
+  build:
+    desc: Manually build the Docker image (normally done by Kargo Warehouse)
+    cmds:
+      - |
+        IMAGE_NAME=$(yq eval '.[0].name' images.yaml)
+        REGISTRY=$(yq eval '.[0].registry' images.yaml)
+        REPO=$(yq eval '.[0].repository' images.yaml)
+        TAG=$(date +%Y%m%d-%H%M%S)
+        
+        echo "Building ${REGISTRY}/${REPO}:${TAG}"
+        docker build -t ${REGISTRY}/${REPO}:${TAG} -f app/Dockerfile app/
+        echo "Built image: ${REGISTRY}/${REPO}:${TAG}"
+
+  push:
+    desc: Manually push the Docker image (normally done by Kargo Warehouse)
+    cmds:
+      - |
+        IMAGE_NAME=$(yq eval '.[0].name' images.yaml)
+        REGISTRY=$(yq eval '.[0].registry' images.yaml)
+        REPO=$(yq eval '.[0].repository' images.yaml)
+        TAG=$(docker images --format "{{.Tag}}" ${REGISTRY}/${REPO} | head -1)
+        
+        echo "Pushing ${REGISTRY}/${REPO}:${TAG}"
+        docker push ${REGISTRY}/${REPO}:${TAG}
+        echo "Pushed image: ${REGISTRY}/${REPO}:${TAG}"
+
+  analyze:
+    desc: Manually run image analysis (normally done by Kargo AnalysisTemplate)
+    dir: image-factory/app
+    cmds:
+      - |
+        IMAGE_NAME=$(yq eval '.[0].name' ../../images.yaml)
+        REGISTRY=$(yq eval '.[0].registry' ../../images.yaml)
+        REPO=$(yq eval '.[0].repository' ../../images.yaml)
+        TAG=$(docker images --format "{{.Tag}}" ${REGISTRY}/${REPO} | head -1)
+        
+        echo "Analyzing ${REGISTRY}/${REPO}:${TAG}"
+        .venv/bin/python app.py --analyze ${REGISTRY}/${REPO}:${TAG}
+
+  deploy:
+    desc: Manually deploy the generated manifests (normally done by ArgoCD)
+    cmds:
+      - kubectl apply -f dist/image-factory.k8s.yaml
+
+  # Utility tasks
+  clean:
+    desc: Clean generated files
+    cmds:
+      - rm -rf base-images/ images/ dist/
+
+  status:
+    desc: Show status of generated files and Docker images
+    cmds:
+      - |
+        echo "=== Generated State Files ==="
+        ls -lh base-images/ images/ 2>/dev/null || echo "No state files generated"
+        echo ""
+        echo "=== Generated Manifests ==="
+        ls -lh dist/ 2>/dev/null || echo "No manifests generated"
+        echo ""
+        echo "=== Docker Images ==="
+        IMAGE_NAME=$(yq eval '.[0].name' images.yaml)
+        REGISTRY=$(yq eval '.[0].registry' images.yaml)
+        REPO=$(yq eval '.[0].repository' images.yaml)
+        docker images ${REGISTRY}/${REPO} 2>/dev/null || echo "No images built"
+
