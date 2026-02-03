@@ -2,26 +2,89 @@
 version: '3'
 
 tasks:
-  # Setup and initialization
+  # Setup tasks (paths relative to state repo root where image-factory/ is a submodule)
+  app:setup:
+    desc: "Set up Image Factory app component"
+    dir: image-factory/app
+    cmds:
+      - cmd: echo "🔧 Setting up Image Factory app environment..."
+        silent: true
+      - cmd: |
+          if [ -n "$CI" ]; then
+            echo "CI environment detected, skipping virtual environment creation"
+          else
+            if [ ! -d ".venv" ]; then
+              echo "Creating virtual environment..."
+              python3 -m venv .venv
+            fi
+          fi
+        silent: true
+      - cmd: |
+          echo "Installing dependencies..."
+          if [ -n "$CI" ]; then
+            pip install -e ".[dev]"
+          else
+            .venv/bin/pip install -e ".[dev]"
+          fi
+        silent: true
+
+  cdk8s:setup:
+    desc: "Set up Image Factory CDK8s component"
+    dir: image-factory/cdk8s
+    cmds:
+      - cmd: echo "🔧 Setting up Image Factory CDK8s environment..."
+        silent: true
+      - cmd: |
+          if [ -n "$CI" ]; then
+            echo "CI environment detected, skipping virtual environment creation"
+          else
+            if [ ! -d ".venv" ]; then
+              echo "Creating virtual environment..."
+              
+              echo "Finding compatible Python version (>=3.10, <3.15)"
+              python_cmd=""
+              for py in python3.11 python3.12 python3.13 python3.10 python3; do
+                if command -v "$py" >/dev/null 2>&1; then
+                  if $py -c "import sys; exit(0 if (3, 10) <= sys.version_info[:2] < (3, 15) else 1)" 2>/dev/null; then
+                    python_version=$($py -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+                    echo "Found compatible Python $python_version ($py)"
+                    python_cmd="$py"
+                    break
+                  fi
+                fi
+              done
+              
+              if [ -z "$python_cmd" ]; then
+                echo "Error: No compatible Python version found"
+                echo "Required: Python >=3.10, <3.15 (GitHub Actions uses 3.11)"
+                echo "Available Python versions:"
+                for py in python3.11 python3.12 python3.13 python3.10 python3; do
+                  if command -v "$py" >/dev/null 2>&1; then
+                    version=$($py -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "unknown")
+                    echo "  $py: Python $version"
+                  fi
+                done
+                exit 1
+              fi
+              
+              $python_cmd -m venv .venv
+            fi
+          fi
+        silent: true
+      - cmd: |
+          echo "Installing dependencies..."
+          if [ -n "$CI" ]; then
+            pip install -e ".[dev]"
+          else
+            .venv/bin/pip install -e ".[dev]"
+          fi
+        silent: true
+
   setup:
-    desc: Set up the Image Factory environment (app + cdk8s)
+    desc: "Set up the Image Factory environment (app + cdk8s)"
     cmds:
       - task: app:setup
       - task: cdk8s:setup
-
-  app:setup:
-    desc: Set up the Image Factory app tool
-    dir: image-factory/app
-    cmds:
-      - uv venv
-      - uv pip install -e .
-
-  cdk8s:setup:
-    desc: Set up the CDK8s environment
-    dir: image-factory/cdk8s
-    cmds:
-      - uv venv
-      - uv pip install -e .
 
   # Submodule management
   submodule:use-local:
@@ -82,17 +145,16 @@ tasks:
   # Generation workflow (what Kargo normally does)
   app:generate:
     desc: Generate state files from images.yaml
-    dir: image-factory/app
     cmds:
-      - .venv/bin/python app.py --images-yaml ../../images.yaml --output-dir ../..
+      - image-factory/app/.venv/bin/python image-factory/app/generate_state.py --images-yaml images.yaml --output-dir .
 
   synth:
     desc: Generate Kargo manifests from state files (CDK8s synthesis)
-    dir: image-factory/cdk8s
     env:
-      IMAGE_FACTORY_STATE_DIR: ../..
+      IMAGE_FACTORY_STATE_DIR: "{{.ROOT_DIR}}"
+      IMAGES_YAML: "{{.ROOT_DIR}}/images.yaml"
     cmds:
-      - .venv/bin/python main.py
+      - image-factory/cdk8s/.venv/bin/python image-factory/cdk8s/main.py
 
   generate:
     desc: Run the complete generation workflow (app → cdk8s)
@@ -106,8 +168,8 @@ tasks:
     cmds:
       - |
         IMAGE_NAME=$(yq eval '.[0].name' images.yaml)
-        REGISTRY=$(yq eval '.[0].registry' images.yaml)
-        REPO=$(yq eval '.[0].repository' images.yaml)
+        REGISTRY=$(yq eval '.[0].enrollment.registry' images.yaml)
+        REPO=$(yq eval '.[0].enrollment.repository' images.yaml)
         TAG=$(date +%Y%m%d-%H%M%S)
         
         echo "Building ${REGISTRY}/${REPO}:${TAG}"
@@ -119,8 +181,8 @@ tasks:
     cmds:
       - |
         IMAGE_NAME=$(yq eval '.[0].name' images.yaml)
-        REGISTRY=$(yq eval '.[0].registry' images.yaml)
-        REPO=$(yq eval '.[0].repository' images.yaml)
+        REGISTRY=$(yq eval '.[0].enrollment.registry' images.yaml)
+        REPO=$(yq eval '.[0].enrollment.repository' images.yaml)
         TAG=$(docker images --format "{{.Tag}}" ${REGISTRY}/${REPO} | head -1)
         
         echo "Pushing ${REGISTRY}/${REPO}:${TAG}"
@@ -133,8 +195,8 @@ tasks:
     cmds:
       - |
         IMAGE_NAME=$(yq eval '.[0].name' ../../images.yaml)
-        REGISTRY=$(yq eval '.[0].registry' ../../images.yaml)
-        REPO=$(yq eval '.[0].repository' ../../images.yaml)
+        REGISTRY=$(yq eval '.[0].enrollment.registry' ../../images.yaml)
+        REPO=$(yq eval '.[0].enrollment.repository' ../../images.yaml)
         TAG=$(docker images --format "{{.Tag}}" ${REGISTRY}/${REPO} | head -1)
         
         echo "Analyzing ${REGISTRY}/${REPO}:${TAG}"
@@ -143,7 +205,7 @@ tasks:
   deploy:
     desc: Manually deploy the generated manifests (normally done by ArgoCD)
     cmds:
-      - kubectl apply -f dist/image-factory.k8s.yaml
+      - kubectl apply -f dist/cdk8s/image-factory.k8s.yaml
 
   # Utility tasks
   clean:
@@ -159,11 +221,10 @@ tasks:
         ls -lh base-images/ images/ 2>/dev/null || echo "No state files generated"
         echo ""
         echo "=== Generated Manifests ==="
-        ls -lh dist/ 2>/dev/null || echo "No manifests generated"
+        ls -lh dist/cdk8s/ 2>/dev/null || echo "No manifests generated"
         echo ""
         echo "=== Docker Images ==="
         IMAGE_NAME=$(yq eval '.[0].name' images.yaml)
-        REGISTRY=$(yq eval '.[0].registry' images.yaml)
-        REPO=$(yq eval '.[0].repository' images.yaml)
+        REGISTRY=$(yq eval '.[0].enrollment.registry' images.yaml)
+        REPO=$(yq eval '.[0].enrollment.repository' images.yaml)
         docker images ${REGISTRY}/${REPO} 2>/dev/null || echo "No images built"
-

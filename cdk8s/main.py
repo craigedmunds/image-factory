@@ -35,7 +35,6 @@ logging.basicConfig(level=logging.WARN, format='%(asctime)s - %(levelname)s - %(
 # Paths
 SCRIPT_DIR = Path(__file__).parent
 IMAGE_FACTORY_DIR = SCRIPT_DIR.parent
-IMAGES_YAML = IMAGE_FACTORY_DIR / "images.yaml"
 
 # State directory can be overridden via environment variable
 # Default to ../image-factory-state for local development
@@ -43,6 +42,9 @@ import os
 STATE_DIR = Path(os.getenv("IMAGE_FACTORY_STATE_DIR", SCRIPT_DIR / "../../image-factory-state"))
 STATE_IMAGES_DIR = STATE_DIR / "images"
 STATE_BASE_IMAGES_DIR = STATE_DIR / "base-images"
+
+# images.yaml can be overridden via environment variable
+IMAGES_YAML = Path(os.getenv("IMAGES_YAML", STATE_DIR / "images.yaml"))
 
 NAMESPACE = "image-factory-kargo"
 
@@ -104,7 +106,7 @@ class ImageFactoryChart(Chart):
 
 # Main entry point
 app = App(
-    outdir=str(os.getenv("CDK8S_OUTDIR", STATE_DIR / "dist"))
+    outdir=str(os.getenv("CDK8S_OUTDIR", STATE_DIR / "dist" / "cdk8s"))
 )
 ImageFactoryChart(app, "image-factory")
 app.synth()

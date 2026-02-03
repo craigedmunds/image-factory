@@ -20,6 +20,7 @@ yarn-error.log*
 
 # CDK8s
 cdk8s.out/
+cdk8s/.venv/
 
 # IDE
 .vscode/
