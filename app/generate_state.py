@@ -9,6 +9,7 @@ directories by analyzing Dockerfiles to discover base image dependencies.
 import yaml
 import sys
 import re
+import os
 from pathlib import Path
 from datetime import datetime, timezone
 import subprocess
@@ -76,11 +77,19 @@ def clone_repo_if_needed(source: dict, dockerfile_path: str, cache_dir: Path) ->
     if not repo:
         raise ValueError("No repo specified in source")
 
-    # Build git URL
+    # Build git URL (inject token for authenticated access to private repos)
+    github_token = os.environ.get("GITHUB_TOKEN", "")
     if provider == "github":
-        git_url = f"https://github.com/{repo}.git"
+        if github_token:
+            git_url = f"https://x-access-token:{github_token}@github.com/{repo}.git"
+        else:
+            git_url = f"https://github.com/{repo}.git"
     elif provider == "gitlab":
-        git_url = f"https://gitlab.com/{repo}.git"
+        gitlab_token = os.environ.get("GITLAB_TOKEN", "")
+        if gitlab_token:
+            git_url = f"https://oauth2:{gitlab_token}@gitlab.com/{repo}.git"
+        else:
+            git_url = f"https://gitlab.com/{repo}.git"
     else:
         raise ValueError(f"Unknown provider: {provider}")
 
@@ -92,7 +101,11 @@ def clone_repo_if_needed(source: dict, dockerfile_path: str, cache_dir: Path) ->
         print(f"  Using cached Dockerfile: {dockerfile_full_path}")
         return repo_cache_dir
 
-    print(f"  Fetching {dockerfile_path} from {git_url} (branch: {branch})...")
+    # Log URL without token
+    display_url = (
+        re.sub(r"://[^@]+@", "://***@", git_url) if "@" in git_url else git_url
+    )
+    print(f"  Fetching {dockerfile_path} from {display_url} (branch: {branch})...")
 
     repo_cache_dir.mkdir(parents=True, exist_ok=True)
     git_dir = repo_cache_dir / ".git"
