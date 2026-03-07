@@ -27,7 +27,7 @@ jobs:
         with:
           repository: craigedmunds/image-factory-state
           path: image-factory-state
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.PAT_TOKEN }}
       
       - name: Set up Python
         uses: actions/setup-python@v5
