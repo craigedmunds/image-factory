@@ -43,7 +43,7 @@ jobs:
       
       - name: Synthesize Kargo manifests
         working-directory: image-factory/cdk8s
-        run: .venv/bin/python main.py
+        run: python main.py
       
       - name: Check if synthesis generated changes
         id: check_changes
