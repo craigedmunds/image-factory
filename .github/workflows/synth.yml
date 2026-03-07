@@ -27,7 +27,7 @@ jobs:
         with:
           repository: craigedmunds/image-factory-state
           path: image-factory-state
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.PAT_TOKEN }}
       
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -43,13 +43,13 @@ jobs:
       
       - name: Synthesize Kargo manifests
         working-directory: image-factory/cdk8s
-        run: .venv/bin/python main.py
+        run: python main.py
       
       - name: Check if synthesis generated changes
         id: check_changes
         working-directory: image-factory-state
         run: |
-          if git diff --quiet dist/image-factory.k8s.yaml; then
+          if git diff --quiet dist/cdk8s/image-factory.k8s.yaml; then
             echo "has_changes=false" >> $GITHUB_OUTPUT
             echo "✅ Kargo resources are already up to date"
           else
@@ -57,7 +57,7 @@ jobs:
             echo "📝 Synthesis generated new Kargo resources"
             echo ""
             echo "Changes:"
-            git diff --stat dist/image-factory.k8s.yaml
+            git diff --stat dist/cdk8s/image-factory.k8s.yaml
           fi
       
       - name: Commit synthesized resources to state repo
@@ -66,7 +66,7 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add dist/image-factory.k8s.yaml
+          git add dist/cdk8s/image-factory.k8s.yaml
           git commit -m "Auto-synth: Regenerate Kargo resources" \
             -m "Synthesized from image-factory@${{ github.sha }}" \
             -m "Triggered by: ${{ github.event_name }}"

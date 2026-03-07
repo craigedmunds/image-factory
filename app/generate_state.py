@@ -5,10 +5,13 @@ Generate state files from images.yaml.
 This script reads images.yaml and generates state files in base-images/ and images/
 directories by analyzing Dockerfiles to discover base image dependencies.
 """
+
 import yaml
 import sys
 import re
+import os
 from pathlib import Path
+from datetime import datetime, timezone
 import subprocess
 import argparse
 
@@ -24,27 +27,29 @@ def parse_dockerfile_base_images(dockerfile_path: Path) -> list:
     if not dockerfile_path.exists():
         print(f"Warning: Dockerfile not found: {dockerfile_path}", file=sys.stderr)
         return []
-    
+
     base_images = []
-    with open(dockerfile_path, 'r') as f:
+    with open(dockerfile_path, "r") as f:
         for line in f:
             line = line.strip()
-            if line.startswith('FROM '):
+            if line.startswith("FROM "):
                 # Extract image reference, handle AS alias
-                match = re.match(r'FROM\s+([^\s]+)', line)
+                match = re.match(r"FROM\s+([^\s]+)", line)
                 if match:
                     image_ref = match.group(1)
                     # Skip scratch and stage references
-                    if image_ref.lower() != 'scratch' and not is_stage_reference(image_ref):
+                    if image_ref.lower() != "scratch" and not is_stage_reference(
+                        image_ref
+                    ):
                         base_images.append(image_ref)
-    
+
     return base_images
 
 
 def is_stage_reference(image_ref: str) -> bool:
     """Check if image reference is a stage name (not a real image)."""
     # Stage names are typically lowercase and don't contain registry/repository patterns
-    if '/' in image_ref or ':' in image_ref or '.' in image_ref:
+    if "/" in image_ref or ":" in image_ref or "." in image_ref:
         return False
     # Stage names are usually simple identifiers
     return image_ref.islower() and len(image_ref) < 20
@@ -53,7 +58,7 @@ def is_stage_reference(image_ref: str) -> bool:
 def normalize_base_image_name(image_ref: str) -> str:
     """Convert image reference to normalized name for filename."""
     # Replace special chars with hyphens
-    name = re.sub(r'[:/]', '-', image_ref)
+    name = re.sub(r"[:/]", "-", image_ref)
     return name
 
 
@@ -61,224 +66,410 @@ def clone_repo_if_needed(source: dict, dockerfile_path: str, cache_dir: Path) ->
     """
     Clone a git repository (sparse checkout of just the Dockerfile) to cache directory.
     Returns the path to the cloned repo.
+
+    If the repo is already cloned but the requested Dockerfile isn't in the sparse
+    checkout, it is added and re-fetched (supports multiple Dockerfiles from one repo).
     """
     provider = source.get("provider", "github")
     repo = source.get("repo")
     branch = source.get("branch", "main")
-    
+
     if not repo:
         raise ValueError("No repo specified in source")
-    
-    # Build git URL
+
+    # Build git URL (inject token for authenticated access to private repos)
+    github_token = os.environ.get("GITHUB_TOKEN", "")
     if provider == "github":
-        git_url = f"https://github.com/{repo}.git"
+        if github_token:
+            git_url = f"https://x-access-token:{github_token}@github.com/{repo}.git"
+        else:
+            git_url = f"https://github.com/{repo}.git"
     elif provider == "gitlab":
-        git_url = f"https://gitlab.com/{repo}.git"
+        gitlab_token = os.environ.get("GITLAB_TOKEN", "")
+        if gitlab_token:
+            git_url = f"https://oauth2:{gitlab_token}@gitlab.com/{repo}.git"
+        else:
+            git_url = f"https://gitlab.com/{repo}.git"
     else:
         raise ValueError(f"Unknown provider: {provider}")
-    
+
     # Create cache directory for this repo
     repo_cache_dir = cache_dir / repo.replace("/", "_")
     dockerfile_full_path = repo_cache_dir / dockerfile_path
-    
+
     if dockerfile_full_path.exists():
         print(f"  Using cached Dockerfile: {dockerfile_full_path}")
         return repo_cache_dir
-    
-    print(f"  Fetching {dockerfile_path} from {git_url} (branch: {branch})...")
-    
-    # Use sparse checkout to only fetch the Dockerfile
+
+    # Log URL without token
+    display_url = (
+        re.sub(r"://[^@]+@", "://***@", git_url) if "@" in git_url else git_url
+    )
+    print(f"  Fetching {dockerfile_path} from {display_url} (branch: {branch})...")
+
     repo_cache_dir.mkdir(parents=True, exist_ok=True)
-    
+    git_dir = repo_cache_dir / ".git"
+    already_initialised = git_dir.exists()
+
     try:
-        # Initialize git repo
-        subprocess.run(
-            ["git", "init"],
-            cwd=repo_cache_dir,
-            check=True,
-            capture_output=True
-        )
-        
-        # Enable sparse checkout
-        subprocess.run(
-            ["git", "config", "core.sparseCheckout", "true"],
-            cwd=repo_cache_dir,
-            check=True,
-            capture_output=True
-        )
-        
-        # Specify which files to checkout
-        sparse_checkout_file = repo_cache_dir / ".git" / "info" / "sparse-checkout"
+        if not already_initialised:
+            # Fresh clone: init, add remote, enable sparse checkout
+            subprocess.run(
+                ["git", "init"], cwd=repo_cache_dir, check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "config", "core.sparseCheckout", "true"],
+                cwd=repo_cache_dir,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "remote", "add", "origin", git_url],
+                cwd=repo_cache_dir,
+                check=True,
+                capture_output=True,
+            )
+
+        # Append the requested path to the sparse-checkout list (deduplicates)
+        sparse_checkout_file = git_dir / "info" / "sparse-checkout"
         sparse_checkout_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(sparse_checkout_file, 'w') as f:
-            f.write(f"{dockerfile_path}\n")
-        
-        # Add remote
-        subprocess.run(
-            ["git", "remote", "add", "origin", git_url],
-            cwd=repo_cache_dir,
-            check=True,
-            capture_output=True
-        )
-        
-        # Fetch and checkout
+
+        existing_paths = set()
+        if sparse_checkout_file.exists():
+            existing_paths = {
+                line.strip()
+                for line in sparse_checkout_file.read_text().splitlines()
+                if line.strip()
+            }
+
+        if dockerfile_path not in existing_paths:
+            with open(sparse_checkout_file, "a") as f:
+                f.write(f"{dockerfile_path}\n")
+
+        # Fetch and checkout (re-fetch is cheap with --depth 1)
         subprocess.run(
             ["git", "fetch", "--depth", "1", "origin", branch],
             cwd=repo_cache_dir,
             check=True,
-            capture_output=True
+            capture_output=True,
         )
-        
-        subprocess.run(
-            ["git", "checkout", branch],
-            cwd=repo_cache_dir,
-            check=True,
-            capture_output=True
-        )
-        
+
+        # Use checkout for fresh clones, read-tree for updates
+        if not already_initialised:
+            subprocess.run(
+                ["git", "checkout", branch],
+                cwd=repo_cache_dir,
+                check=True,
+                capture_output=True,
+            )
+        else:
+            subprocess.run(
+                ["git", "read-tree", "-mu", "FETCH_HEAD"],
+                cwd=repo_cache_dir,
+                check=True,
+                capture_output=True,
+            )
+
         print(f"  Fetched to {repo_cache_dir}")
-        
+
     except subprocess.CalledProcessError as e:
         print(f"  Error during git operations: {e}", file=sys.stderr)
-        # Clean up partial clone
-        import shutil
-        shutil.rmtree(repo_cache_dir, ignore_errors=True)
+        if not already_initialised:
+            # Only clean up if we just created it
+            import shutil
+
+            shutil.rmtree(repo_cache_dir, ignore_errors=True)
         raise
-    
+
     return repo_cache_dir
+
+
+def _yaml_block(data: dict, indent: int = 0) -> str:
+    """Render a dict as YAML with controlled key ordering (preserves insertion order)."""
+    lines = []
+    prefix = "  " * indent
+    for key, value in data.items():
+        if value is None:
+            lines.append(f"{prefix}{key}: null")
+        elif isinstance(value, bool):
+            lines.append(f"{prefix}{key}: {'true' if value else 'false'}")
+        elif isinstance(value, list):
+            if not value:
+                lines.append(f"{prefix}{key}: []")
+            else:
+                lines.append(f"{prefix}{key}:")
+                for item in value:
+                    if isinstance(item, dict):
+                        # Nested dict in list — use yaml.dump for simplicity
+                        dumped = yaml.dump(item, default_flow_style=False).strip()
+                        first, *rest = dumped.split("\n")
+                        lines.append(f"{prefix}  - {first}")
+                        for r in rest:
+                            lines.append(f"{prefix}    {r}")
+                    else:
+                        lines.append(f"{prefix}  - {item}")
+        elif isinstance(value, dict):
+            lines.append(f"{prefix}{key}:")
+            lines.append(_yaml_block(value, indent + 1))
+        elif isinstance(value, str):
+            # Quote strings that look like timestamps or contain special chars
+            if (
+                re.match(r"^\d{4}-\d{2}-\d{2}", value)
+                or ":" in value
+                and not value.startswith("^")
+            ):
+                lines.append(f"{prefix}{key}: '{value}'")
+            else:
+                lines.append(f"{prefix}{key}: {value}")
+        else:
+            lines.append(f"{prefix}{key}: {value}")
+    return "\n".join(lines)
+
+
+def _write_app_image_state(
+    state_file: Path,
+    name: str,
+    enrollment_data: dict,
+    base_images: list,
+    existing: dict | None,
+) -> None:
+    """Write an application image state file in the canonical format with comments."""
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Preserve timestamps from existing file, or set new ones
+    if existing:
+        enrolled_at = existing.get("enrolledAt", now)
+        last_discovery = existing.get("lastDiscovery", now)
+        discovery_status = existing.get("discoveryStatus", "pending")
+        current_version = existing.get("currentVersion")
+        current_digest = existing.get("currentDigest")
+        last_built = existing.get("lastBuilt")
+    else:
+        enrolled_at = now
+        last_discovery = now
+        discovery_status = "pending"
+        current_version = None
+        current_digest = None
+        last_built = None
+
+    # Build enrollment block with controlled key order
+    enrollment_ordered = {}
+    for key in [
+        "registry",
+        "repository",
+        "source",
+        "rebuildDelay",
+        "autoRebuild",
+        "updates",
+    ]:
+        if key in enrollment_data:
+            enrollment_ordered[key] = enrollment_data[key]
+
+    # Format base images list
+    if base_images:
+        base_images_block = "\n".join(f"  - {b}" for b in sorted(base_images))
+    else:
+        base_images_block = None
+
+    # Build the file content with comments and controlled ordering
+    lines = [
+        "# Auto-generated by Image Factory",
+        f"# This file tracks the state of the {name} image",
+        f"name: {name}",
+        f"enrolledAt: '{enrolled_at}'",
+        f"lastDiscovery: '{last_discovery}'",
+        f"discoveryStatus: {discovery_status}",
+        "",
+        "# Enrollment configuration (copied from images.yaml for reference)",
+        _yaml_block({"enrollment": enrollment_ordered}),
+        "",
+        "# Discovered from Dockerfile parsing",
+        "# References to base image state files (not inline data)",
+    ]
+
+    if base_images_block:
+        lines.append("baseImages:")
+        lines.append(base_images_block)
+    else:
+        lines.append("baseImages: []")
+
+    lines += [
+        "",
+        "# Current published state (from registry/Kargo)",
+        f"currentVersion: {'null' if current_version is None else current_version}",
+        f"currentDigest: {'null' if current_digest is None else current_digest}",
+        f"lastBuilt: {'null' if last_built is None else last_built}",
+        "",  # trailing newline
+    ]
+
+    with open(state_file, "w") as f:
+        f.write("\n".join(lines))
 
 
 def generate_state_for_image(image: dict, output_dir: Path, cache_dir: Path) -> bool:
     """
-    Generate state file for a single image by analyzing its Dockerfile.
-    
-    Simulates what Kargo does: clone repo, analyze Dockerfile, discover base images.
+    Generate or update state file for a single image by analyzing its Dockerfile.
+
+    Idempotent: if a state file already exists, only enrollment and baseImages are
+    updated (if changed). Timestamps and other runtime state are preserved.
     """
     name = image.get("name")
     if not name:
         print(f"Skipping image without name: {image}", file=sys.stderr)
         return False
-    
+
     # Determine if this is a base image or application image
-    # Check both input format (top-level source) and state format (enrollment.source)
     source = image.get("source", {})
     if not source:
         enrollment = image.get("enrollment", {})
         source = enrollment.get("source", {})
-    
+
     is_base_image = not source  # Base images don't have source
-    
-    # Create state directory
+
+    # Determine state directory
     if is_base_image:
         state_dir = output_dir / "base-images"
     else:
         state_dir = output_dir / "images"
-    
+
     state_dir.mkdir(parents=True, exist_ok=True)
     state_file = state_dir / f"{name}.yaml"
-    
-    # For base images, just copy the config
+
+    # ── Base images: skip if file already exists (never overwrite) ──
     if is_base_image:
-        with open(state_file, 'w') as f:
-            yaml.dump(image, f, default_flow_style=False)
-        print(f"✓ Generated state for base image: {name}")
+        if state_file.exists():
+            print(f"  Skipping existing base image state: {state_file}")
+        else:
+            with open(state_file, "w") as f:
+                yaml.dump(image, f, default_flow_style=False)
+            print(f"✓ Generated state for base image: {name}")
         return True
-    
-    # For application images, analyze Dockerfile to discover base images
+
+    # ── Application images ──
+
+    # Load existing state (if any) so we can preserve timestamps
+    existing = None
+    if state_file.exists():
+        with open(state_file) as f:
+            existing = yaml.safe_load(f)
+
+    # Analyze Dockerfile to discover base images
     dockerfile_path = source.get("dockerfile")
     base_images = []
-    
+    discovery_failed = False
+
     if dockerfile_path:
-        # Clone the repo if needed (sparse checkout of just the Dockerfile)
         try:
             repo_dir = clone_repo_if_needed(source, dockerfile_path, cache_dir)
             full_dockerfile_path = repo_dir / dockerfile_path
-            
+
             if full_dockerfile_path.exists():
                 discovered = parse_dockerfile_base_images(full_dockerfile_path)
-                # Normalize and deduplicate base image names
                 seen = set()
                 for base_image_ref in discovered:
                     base_image_name = normalize_base_image_name(base_image_ref)
                     if base_image_name not in seen:
                         base_images.append(base_image_name)
                         seen.add(base_image_name)
-                
+
                 if base_images:
                     print(f"  Discovered {len(base_images)} base images: {base_images}")
             else:
-                print(f"  Warning: Dockerfile not found at {full_dockerfile_path}", file=sys.stderr)
+                discovery_failed = True
+                print(
+                    f"  Warning: Dockerfile not found at {full_dockerfile_path}",
+                    file=sys.stderr,
+                )
         except Exception as e:
+            discovery_failed = True
             print(f"  Error fetching/analyzing Dockerfile: {e}", file=sys.stderr)
-    
-    # Wrap input in enrollment structure for state file
-    # Input format: top-level registry, repository, source
-    # State format: enrollment wrapper + metadata fields
+
+    # If discovery failed and we have existing baseImages, preserve them
+    if discovery_failed and existing:
+        existing_base = existing.get("baseImages") or []
+        if existing_base:
+            base_images = list(existing_base)
+            print(f"  Preserving existing baseImages (discovery failed): {base_images}")
+
+    # Build enrollment data from images.yaml input
     enrollment_data = {}
-    for key in ['registry', 'repository', 'source', 'rebuildDelay', 'autoRebuild', 'updates']:
+    for key in [
+        "registry",
+        "repository",
+        "source",
+        "rebuildDelay",
+        "autoRebuild",
+        "updates",
+    ]:
         if key in image:
             enrollment_data[key] = image[key]
-    
-    state_data = {
-        "name": name,
-        "enrollment": enrollment_data,
-        "baseImages": sorted(base_images),  # Add discovered base images
-        "lastAnalyzed": None,
-        "analysisStatus": "pending",
-    }
-    
-    with open(state_file, 'w') as f:
-        yaml.dump(state_data, f, default_flow_style=False)
-    
-    print(f"✓ Generated state for application image: {name}")
+
+    # Check if anything actually changed vs existing file
+    if existing:
+        existing_enrollment = existing.get("enrollment", {})
+        existing_base_images = sorted(existing.get("baseImages") or [])
+        new_base_images = sorted(base_images)
+
+        if (
+            existing_enrollment == enrollment_data
+            and existing_base_images == new_base_images
+        ):
+            print(f"  No changes for {name}, skipping write")
+            return True
+
+        print(f"  Updating state for {name} (enrollment or baseImages changed)")
+
+    _write_app_image_state(state_file, name, enrollment_data, base_images, existing)
+
+    verb = "Updated" if existing else "Generated"
+    print(f"✓ {verb} state for application image: {name}")
     return True
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate state files from images.yaml")
+    parser = argparse.ArgumentParser(
+        description="Generate state files from images.yaml"
+    )
     parser.add_argument(
-        "--images-yaml",
-        type=Path,
-        required=True,
-        help="Path to images.yaml"
+        "--images-yaml", type=Path, required=True, help="Path to images.yaml"
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         required=True,
-        help="Output directory for state files (will create base-images/ and images/ subdirs)"
+        help="Output directory for state files (will create base-images/ and images/ subdirs)",
     )
     parser.add_argument(
         "--cache-dir",
         type=Path,
         default=None,
-        help="Cache directory for cloned repos (default: .image-factory-cache in output dir)"
+        help="Cache directory for cloned repos (default: .image-factory-cache in output dir)",
     )
-    
+
     args = parser.parse_args()
-    
+
     if not args.images_yaml.exists():
         print(f"Error: images.yaml not found at {args.images_yaml}", file=sys.stderr)
         sys.exit(1)
-    
+
     # Set up cache directory
     if args.cache_dir:
         cache_dir = args.cache_dir
     else:
         cache_dir = args.output_dir / ".image-factory-cache"
-    
+
     cache_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Load images
     images = load_images_yaml(args.images_yaml)
     print(f"Found {len(images)} images in {args.images_yaml}")
-    
+
     # Generate state for each image
     success_count = 0
     for image in images:
         if generate_state_for_image(image, args.output_dir, cache_dir):
             success_count += 1
-    
+
     print(f"\n✓ Generated state files for {success_count}/{len(images)} images")
     print(f"  Base images: {args.output_dir}/base-images/")
     print(f"  Application images: {args.output_dir}/images/")
