@@ -509,6 +509,9 @@ jobs:
           tags: |
             ${{{{ env.REGISTRY }}}}/${{{{ env.IMAGE_NAME }}}}:${{{{ inputs.tag }}}}
             ${{{{ env.REGISTRY }}}}/${{{{ env.IMAGE_NAME }}}}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/{repo}
+            org.opencontainers.image.description={name} (built by image-factory)
           cache-from: type=gha
           cache-to: type=gha,mode=max
 """
