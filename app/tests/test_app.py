@@ -437,31 +437,6 @@ class TestGenerateBuildWorkflow:
         assert "repository: upstream/test-app" in content
         assert "context: ." in content
 
-    def test_backward_compat_source_patchfile(self, output_dir):
-        """Test backward compatibility with source.patchFile (old config)."""
-        from generate_state import _generate_build_workflow
-
-        image = {
-            "name": "test-app",
-            "registry": "ghcr.io",
-            "repository": "org/test-app",
-            "source": {
-                "provider": "github",
-                "repo": "upstream/test-app",
-                "branch": "main",
-                "dockerfile": "Dockerfile",
-                "patchFile": "patches/test-app/Dockerfile.patch",
-            },
-        }
-
-        result = _generate_build_workflow(image, output_dir)
-        assert result is True
-
-        content = self._read_workflow(output_dir, "test-app")
-        assert "Checkout local files" in content
-        assert "sparse-checkout: patches/test-app" in content
-        assert "git apply _image-factory/patches/test-app/Dockerfile.patch" in content
-
     def test_skips_when_source_has_workflow(self, output_dir):
         """Test that workflow generation is skipped when source.workflow is set."""
         from generate_state import _generate_build_workflow

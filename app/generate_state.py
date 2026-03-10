@@ -461,13 +461,6 @@ def _generate_build_workflow(image: dict, output_dir: Path) -> bool:
     patch_files = local.get("patchFiles", [])
     version_file = local.get("versionFile", "")
 
-    # Backward compat: support source.patchFile (single string) from older configs
-    if not patch_files and source.get("patchFile"):
-        patch_files = [source["patchFile"]]
-        if not local_dir:
-            # Infer local_dir from patchFile path
-            local_dir = str(Path(source["patchFile"]).parent)
-
     # Docker context is always the repo root — Dockerfiles typically COPY from root
     docker_context = "."
 
