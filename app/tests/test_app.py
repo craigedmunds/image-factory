@@ -393,6 +393,10 @@ class TestGenerateBuildWorkflow:
         assert "Checkout local files" not in content
         assert "Apply patch" not in content
         assert "Read version" not in content
+        assert "Bump version" not in content
+        assert "increment" not in content
+        # No version file means contents: read only
+        assert "contents: read" in content
 
     def test_generates_workflow_with_local_block(self, output_dir):
         """Test generating a workflow with local config (patches + version)."""
@@ -429,13 +433,28 @@ class TestGenerateBuildWorkflow:
         # Version file read
         assert "Read version" in content
         assert "cat _image-factory/local/test-app/VERSION" in content
-        # Tag uses version with input override
-        assert "inputs.tag || steps.version.outputs.version" in content
-        # No hardcoded default tag
+        # Resolve tag step with suffix support
+        assert "Resolve tag" in content
+        assert "inputs.suffix" in content
+        assert "steps.tag.outputs.tag" in content
+        # No tag input, no hardcoded default
         assert 'default: "latest"' not in content
+        assert "inputs.tag" not in content
+        # suffix and increment inputs present
+        assert "suffix" in content
+        assert "increment" in content
+        assert 'default: "patch"' in content
+        assert "options: [major, minor, patch]" in content
         # Still uses upstream source as context
         assert "repository: upstream/test-app" in content
         assert "context: ." in content
+        # Bump step present, gated on empty suffix
+        assert "Bump version" in content
+        assert "if: inputs.suffix == ''" in content
+        assert "git commit" in content
+        assert "git push" in content
+        # Needs write permission to commit back
+        assert "contents: write" in content
 
     def test_skips_when_source_has_workflow(self, output_dir):
         """Test that workflow generation is skipped when source.workflow is set."""
