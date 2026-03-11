@@ -490,9 +490,8 @@ class TestGenerateBuildWorkflow:
         assert "Checkout source" not in content
         assert "Checkout local files" not in content
         assert "Apply patch" not in content
-        # VERSION passed as build arg
-        assert "VERSION=${{ steps.version.outputs.version }}" in content
-        assert "build-args" in content
+        # VERSION is for the image tag only, not passed as a build arg
+        assert "build-args" not in content
         # Version, tag, bump all present
         assert "Read version" in content
         assert "Resolve tag" in content
