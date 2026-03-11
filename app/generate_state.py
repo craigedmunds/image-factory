@@ -511,7 +511,6 @@ def _generate_build_workflow(image: dict, output_dir: Path) -> bool:
             docker_context = "."
 
         version_steps = ""
-        build_args = ""
         bump_step = ""
         if version_path:
             version_steps = f"""
@@ -529,9 +528,6 @@ def _generate_build_workflow(image: dict, output_dir: Path) -> bool:
             echo "tag=$version" >> "$GITHUB_OUTPUT"
           fi
 """
-            build_args = f"""
-          build-args: |
-            VERSION=${{{{ steps.version.outputs.version }}}}"""
             bump_step = f"""
       - name: Bump version
         if: inputs.suffix == ''
@@ -594,7 +590,7 @@ jobs:
         with:
           context: {docker_context}
           file: {dockerfile_path}
-          push: true{build_args}
+          push: true
           tags: |
             ${{{{ env.REGISTRY }}}}/${{{{ env.IMAGE_NAME }}}}:{tag_expr}
             ${{{{ env.REGISTRY }}}}/${{{{ env.IMAGE_NAME }}}}:latest
